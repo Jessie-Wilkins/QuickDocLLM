@@ -1,8 +1,13 @@
 [package]
-name = "QuickDocLLm"
+name = "quick_dock_llm"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+llm-chain = "0.12.3"
+llm-chain-llama = "0.12.3"
+llm-chain-llama-sys = "0.12.3"
+llm-chain-local = "0.12.3"
+tokio = { version = "1", features = ["full"] }
