@@ -1,26 +1,143 @@
-use llm_chain::executor;
-use llm_chain::options;
-use llm_chain::options::{ModelRef, Options};
-use std::error::Error;
+use std::io::Write;
+use llm::ModelArchitecture::Llama;
+use llm::{Model, ModelParameters, TokenizerSource, InferenceParameters, 
+    OutputRequest, InferenceError, InferenceStats};
 
-use llm_chain::{prompt::Data, traits::Executor};
+use hora::core::ann_index::ANNIndex;
+use hora::index::hnsw_idx::HNSWIndex;
+use hora::core::metrics::Metric;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn Error>> {
+use std::path::PathBuf;
 
-    let model_type = "llama";
-    let model_path = "model/orca-mini-3b.ggmlv3.q4_1.bin";
-    let prompt = "Who was the president in 1985?";
 
-    let exec = executor!(
-        llama,
-        options!(
-            Model: ModelRef::from_path(model_path),
-            ModelType: model_type.to_string()
+pub struct EmbeddingService {
+    model: Box<dyn Model>,
+    index: HNSWIndex<f32, usize>,
+    documents: Vec<String>,
+}
+
+impl EmbeddingService {
+    pub fn new() -> Self {
+        let n = 1000;
+        let dimension = 64;
+        let model = llm::load_dynamic(
+            Some(Llama),
+            // path to GGML file
+            std::path::Path::new("model/llama-2-7b-chat.ggmlv3.q2_K.bin"),
+            llm::TokenizerSource::Embedded,
+            // llm::ModelParameters
+            Default::default(),
+            // load progress callback
+            llm::load_progress_callback_stdout
         )
-    )?;
-    let res = prompt!(prompt).run(&parameters!(), &exec).await?;
+        .unwrap_or_else(|err| panic!("Failed to load model: {err}"));
 
-    println!("{}", res);
-    Ok(())
+        let index = HNSWIndex::<f32, usize>::new(
+            dimension,
+            &hora::index::hnsw_params::HNSWParams::<f32>::default(),
+        );
+
+        let documents = Vec::new();
+
+        Self { model, index, documents }
+    }
+
+    pub fn infer(&self, query: &str) {
+        let mut session = self.model.start_session(Default::default());
+        let res = session.infer::<std::convert::Infallible>(
+            // model to use for text generation
+            self.model.as_ref(),
+            // randomness provider
+            &mut rand::thread_rng(),
+            // the prompt to use for text generation, as well as other
+            // inference parameters
+            &llm::InferenceRequest {
+                prompt: query.into(),
+                parameters: &llm::InferenceParameters::default(),
+                play_back_previous_tokens: false,
+                maximum_token_count: Some(50),
+            },
+            // llm::OutputRequest
+            &mut Default::default(),
+            // output callback
+            |r| match r {
+                llm::InferenceResponse::PromptToken(t) | llm::InferenceResponse::InferredToken(t) => {
+                    print!("{t}");
+                    std::io::stdout().flush().unwrap();
+                    Ok(llm::InferenceFeedback::Continue)
+                }
+                _ => Ok(llm::InferenceFeedback::Continue),
+            }
+        );
+        match res {
+            Ok(result) => println!("\n\nInference stats:\n{result}"),
+            Err(err) => println!("\n{err}"),
+        }
+    }
+
+    pub fn get_embeddings(&self, query: &str) -> Vec<f32> {
+        let inference_parameters = InferenceParameters::default();
+        let mut session = self.model.start_session(Default::default());
+        let mut output_request = OutputRequest {
+            all_logits: None,
+            embeddings: Some(Vec::new()),
+        };
+        let vocab = self.model.tokenizer();
+        let beginning_of_sentence = true;
+        let query_token_ids = vocab
+            .tokenize(query, beginning_of_sentence)
+            .unwrap()
+            .iter()
+            .map(|(_, tok)| *tok)
+            .collect::<Vec<_>>();
+        self.model.evaluate(&mut session, &query_token_ids, &mut output_request);
+        output_request.embeddings.unwrap()
+    }
+
+    pub fn add_to_index(&mut self, id: usize, vector: &Vec<f32>) {
+        self.index.add(vector, id);
+    }
+
+    pub fn build_index(&mut self) {
+        self.index.build(hora::core::metrics::Metric::Euclidean);   
+    }
+
+    pub fn query(&self, vector: &Vec<f32>, num_results: usize) -> Vec<(usize)> {
+        self.index.search(vector, num_results)
+    }
+
+    pub fn add_document(&mut self, document: String) {
+        let embeddings = self.get_embeddings(&document);
+        self.add_to_index(self.documents.len(), &embeddings);
+        self.documents.push(document);
+    }
+
+    pub fn ask_question(&self, question: &str) -> Vec<&String> {
+        let question_embeddings = self.get_embeddings(question);
+        let results = self.query(&question_embeddings, 10);
+        results.iter().map(|&(id)| &self.documents[id]).collect()
+    }
+}
+
+
+
+fn main() {
+// load a GGML model from disk
+
+
+    let mut embedding_service = EmbeddingService::new();
+
+    // let res = embedding_service.infer("<human>:Who was president of the United States in 1986?\n<bot>:");
+
+    
+    embedding_service.add_document("Ronald Reagan was president of the United States in 1986".to_string());
+    embedding_service.add_document("Bill Clinton was president of the United States in 1996".to_string());
+    embedding_service.add_document("Clowns are hillarious performers with stages ranging from the circus to private parties".to_string());
+    embedding_service.build_index();
+
+    let answers = embedding_service.ask_question("<human>:Who was president of the United States in 1986?\n<bot>:");
+
+    for answer in answers {
+        println!("{}", answer);
+    }
 }
