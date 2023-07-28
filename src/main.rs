@@ -1,13 +1,10 @@
 use std::io::Write;
 use llm::ModelArchitecture::Llama;
-use llm::{Model, ModelParameters, TokenizerSource, InferenceParameters, 
-    OutputRequest, InferenceError, InferenceStats};
+use llm::{Model, 
+    OutputRequest};
 
 use hora::core::ann_index::ANNIndex;
 use hora::index::hnsw_idx::HNSWIndex;
-use hora::core::metrics::Metric;
-
-use std::path::PathBuf;
 
 
 pub struct EmbeddingService {
@@ -18,8 +15,7 @@ pub struct EmbeddingService {
 
 impl EmbeddingService {
     pub fn new() -> Self {
-        let n = 1000;
-        let dimension = 64;
+        let dimension = 4096;
         let model = llm::load_dynamic(
             Some(Llama),
             // path to GGML file
@@ -76,7 +72,6 @@ impl EmbeddingService {
     }
 
     pub fn get_embeddings(&self, query: &str) -> Vec<f32> {
-        let inference_parameters = InferenceParameters::default();
         let mut session = self.model.start_session(Default::default());
         let mut output_request = OutputRequest {
             all_logits: None,
@@ -95,14 +90,14 @@ impl EmbeddingService {
     }
 
     pub fn add_to_index(&mut self, id: usize, vector: &Vec<f32>) {
-        self.index.add(vector, id);
+        self.index.add(vector, id).unwrap();
     }
 
     pub fn build_index(&mut self) {
-        self.index.build(hora::core::metrics::Metric::Euclidean);   
+        self.index.build(hora::core::metrics::Metric::DotProduct).unwrap();   
     }
 
-    pub fn query(&self, vector: &Vec<f32>, num_results: usize) -> Vec<(usize)> {
+    pub fn query(&self, vector: &Vec<f32>, num_results: usize) -> Vec<usize> {
         self.index.search(vector, num_results)
     }
 
@@ -114,8 +109,9 @@ impl EmbeddingService {
 
     pub fn ask_question(&self, question: &str) -> Vec<&String> {
         let question_embeddings = self.get_embeddings(question);
-        let results = self.query(&question_embeddings, 10);
-        results.iter().map(|&(id)| &self.documents[id]).collect()
+        let results = self.query(&question_embeddings, 2);
+
+        results.iter().map(|&id| &self.documents[id]).collect()
     }
 }
 
@@ -127,17 +123,20 @@ fn main() {
 
     let mut embedding_service = EmbeddingService::new();
 
-    // let res = embedding_service.infer("<human>:Who was president of the United States in 1986?\n<bot>:");
-
     
     embedding_service.add_document("Ronald Reagan was president of the United States in 1986".to_string());
     embedding_service.add_document("Bill Clinton was president of the United States in 1996".to_string());
     embedding_service.add_document("Clowns are hillarious performers with stages ranging from the circus to private parties".to_string());
     embedding_service.build_index();
 
-    let answers = embedding_service.ask_question("<human>:Who was president of the United States in 1986?\n<bot>:");
+    let question = "Who was president of the United States in 1986?";
 
-    for answer in answers {
-        println!("{}", answer);
-    }
+    let answers = embedding_service.ask_question(question);
+
+    let answers: Vec<&str> = answers.iter().map(|s| s.as_str()).collect();
+
+    let doc_query_attach = answers.join("\n");
+
+    let res = embedding_service.infer(&format!("<human>:You will answer a question by pulling the answer from the following text: {doc_query_attach}\n
+    Here is the question: {question}\n<bot>:"));
 }
